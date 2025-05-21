@@ -531,6 +531,7 @@ fn make_credentials_callback<'a>(
     let mut try_cred_helper = authenticator.try_cred_helper;
     let mut try_password_prompt = authenticator.try_password_prompt;
     let mut try_ssh_agent = authenticator.try_ssh_agent;
+    let mut try_ssh_keys = true;
     let mut ssh_keys = authenticator.ssh_keys.iter();
     let mut prompter = authenticator.prompter.clone();
 
@@ -572,23 +573,30 @@ fn make_credentials_callback<'a>(
                     }
                 }
 
-                #[allow(clippy::while_let_on_iterator)]
-                // Incorrect lint: we're not consuming the iterator.
-                while let Some(key) = ssh_keys.next() {
-                    debug!(
+                if try_ssh_keys {
+                    try_ssh_keys = false;
+                    #[allow(clippy::while_let_on_iterator)]
+                    // Incorrect lint: we're not consuming the iterator.
+                    while let Some(key) = ssh_keys.next() {
+                        debug!(
                         "credentials_callback: trying ssh key, username: {username:?}, private key: {:?}",
                         key.private_key
                     );
-                    let prompter = Some(prompter.as_prompter_mut())
-                        .filter(|_| authenticator.prompt_ssh_key_password);
-                    match key.to_credentials(username, prompter, git_config) {
-                        Ok(x) => return Ok(x),
-                        Err(e) => debug!(
-                            "credentials_callback: failed to use SSH key from file {:?}: {e}",
-                            key.private_key
-                        ),
+                        let prompter = Some(prompter.as_prompter_mut())
+                            .filter(|_| authenticator.prompt_ssh_key_password);
+                        match key.to_credentials(username, prompter, git_config) {
+                            Ok(x) => return Ok(x),
+                            Err(e) => debug!(
+                                "credentials_callback: failed to use SSH key from file {:?}: {e}",
+                                key.private_key
+                            ),
+                        }
                     }
+
+                    //MORE CODE HERE
                 }
+
+                // Last resort: Try on-the-fly SSH key format convertion to PEM
             }
         }
 

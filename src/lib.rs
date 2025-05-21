@@ -130,6 +130,7 @@ mod default_prompt;
 mod prompter;
 mod ssh_key;
 
+use git2::Error;
 pub use prompter::Prompter;
 
 /// Configurable authenticator to use with [`git2`].
@@ -579,87 +580,112 @@ fn make_credentials_callback<'a>(
                     try_ssh_keys = false;
                     #[allow(clippy::while_let_on_iterator)]
                     // Incorrect lint: we're not consuming the iterator.
-                    while let Some(key) = ssh_keys.next() {
+                    let mut keys_list = ssh_keys.clone();
+                    while let Some(key) = keys_list.next() {
                         debug!(
-                        "credentials_callback: trying ssh key, username: {username:?}, private key: {:?}",
-                        key.private_key
-                    );
+                            "credentials_callback: trying ssh key, username: {username:?}, private key: {:?}",
+                            key.private_key
+                        );
                         let prompter = Some(prompter.as_prompter_mut())
                             .filter(|_| authenticator.prompt_ssh_key_password);
-                        let err = match key.to_credentials(username, prompter, git_config) {
+                        match key.to_credentials(username, prompter, git_config) {
                             Ok(x) => return Ok(x),
                             Err(e) => {
-                                /*debug!(
+                                debug!(
                                 "credentials_callback: failed to use SSH key from file {:?}: {e}",
-                                key.private_key)*/
-                                Err(e)
-                            }
-                        };
-
-                        let mut file = match File::open(&key.private_key) {
-                            Ok(file) => file,
-                            Err(e) => {
-                                debug!("Failed to open SSH key: {}", e);
-                                return err;
-                            }
-                        };
-
-                        let mut contents = String::new();
-                        if file.read_to_string(&mut contents).is_err() {
-                            println!("Failed to read SSH key contents");
-                            return err;
-                        }
-
-                        let is_pem = contents.contains("BEGIN RSA PRIVATE KEY")
-                            || contents.contains("BEGIN PRIVATE KEY")
-                            || contents.contains("BEGIN DSA PRIVATE KEY")
-                            || contents.contains("BEGIN EC PRIVATE KEY");
-
-                        if is_pem {
-                            return err;
-                        }
-
-                        // Create a temporary file
-                        let temp_file = match NamedTempFile::new() {
-                            Ok(file) => file,
-                            Err(e) => {
-                                println!("Failed to create temporary file: {}", e);
-                                return None;
-                            }
-                        };
-
-                        // Copy original key to temp file
-                        if let Err(e) = fs::copy(key_path, temp_file.path()) {
-                            println!("Failed to copy SSH key: {}", e);
-                            return None;
-                        }
-
-                        // Run ssh-keygen to convert format
-                        let status = Command::new("ssh-keygen")
-                            .args(["-p", "-N", "", "-m", "PEM", "-f"])
-                            .arg(temp_file.path())
-                            .status();
-
-                        match status {
-                            Ok(status) if status.success() => {
-                                println!("Successfully converted key to PEM format");
-                                let path = temp_file.path().to_path_buf();
-                                self.temp_key = Some(temp_file); // Keep temp file alive
-                                Some(path)
-                            }
-                            Ok(_) => {
-                                println!("Failed to convert key to PEM format");
-                                None
-                            }
-                            Err(e) => {
-                                println!("Error executing ssh-keygen: {}", e);
-                                None
+                                key.private_key);
+                                return Err(e);
                             }
                         }
                     }
                 }
 
-                // Last resort: Try on-the-fly SSH key format convertion to PEM
+                debug!("Attempting convertion to PEM format");
+                while let Some(key) = ssh_keys.next() {
+                    // Try converting SSH key to PEM format since it's more compatible with libssh2
+                    debug!("Using key {}", &key.private_key.display());
+                    let key_path = &key.private_key;
+                    let mut file = match File::open(&key_path) {
+                        Ok(file) => file,
+                        Err(e) => {
+                            debug!("Failed to open SSH key: {}", &e);
+                            continue;
+                        }
+                    };
+
+                    let mut contents = String::new();
+                    if file.read_to_string(&mut contents).is_err() {
+                        debug!("Failed to read SSH key contents");
+                        continue;
+                    }
+
+                    let is_pem = contents.contains("BEGIN RSA PRIVATE KEY")
+                        || contents.contains("BEGIN PRIVATE KEY")
+                        || contents.contains("BEGIN DSA PRIVATE KEY")
+                        || contents.contains("BEGIN EC PRIVATE KEY");
+
+                    if is_pem {
+                        return Err(Error::from_str(
+                            &"Failed to read SSH key contents".to_string(),
+                        ));
+                    }
+
+                    // Create a temporary file
+                    let temp_file = match tempfile::NamedTempFile::new() {
+                        Ok(file) => file,
+                        Err(e) => {
+                            debug!("Failed to create temporary file: {}", e);
+                            continue;
+                        }
+                    };
+
+                    // Copy original key to temp file
+                    if let Err(e) = std::fs::copy(key_path, temp_file.path()) {
+                        debug!("Failed to copy SSH key: {}", e);
+                        continue;
+                    }
+
+                    // Run ssh-keygen to convert format
+                    let status = std::process::Command::new("ssh-keygen")
+                        .args(["-p", "-N", "", "-m", "PEM", "-f"])
+                        .arg(temp_file.path())
+                        .status();
+
+                    let new_key_path = match status {
+                        Ok(status) if status.success() => {
+                            println!("Successfully converted key to PEM format");
+                            let path = temp_file.path().to_path_buf();
+                            path
+                        }
+                        Ok(_) => {
+                            println!("Failed to convert key to PEM format");
+                            continue;
+                        }
+                        Err(e) => {
+                            println!("Error executing ssh-keygen: {}", e);
+                            continue;
+                        }
+                    };
+
+                    let new_key = PrivateKeyFile {
+                        private_key: new_key_path,
+                        public_key: key.public_key.clone(),
+                        password: key.password.clone(),
+                    };
+
+                    let prompter2 = Some(prompter.as_prompter_mut())
+                        .filter(|_| authenticator.prompt_ssh_key_password);
+                    match new_key.to_credentials(username, prompter2, git_config) {
+                        Ok(x) => return Ok(x),
+                        Err(e) => {
+                            debug!(
+                                "credentials_callback: failed to use SSH key from file {:?}: {e}",
+                                key.private_key
+                            );
+                            continue;
+                        }
+                    }
+                }
             }
         }
 

@@ -95,6 +95,8 @@
 #![warn(missing_docs)]
 
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "log")]
@@ -584,16 +586,77 @@ fn make_credentials_callback<'a>(
                     );
                         let prompter = Some(prompter.as_prompter_mut())
                             .filter(|_| authenticator.prompt_ssh_key_password);
-                        match key.to_credentials(username, prompter, git_config) {
+                        let err = match key.to_credentials(username, prompter, git_config) {
                             Ok(x) => return Ok(x),
-                            Err(e) => debug!(
+                            Err(e) => {
+                                /*debug!(
                                 "credentials_callback: failed to use SSH key from file {:?}: {e}",
-                                key.private_key
-                            ),
+                                key.private_key)*/
+                                Err(e)
+                            }
+                        };
+
+                        let mut file = match File::open(&key.private_key) {
+                            Ok(file) => file,
+                            Err(e) => {
+                                debug!("Failed to open SSH key: {}", e);
+                                return err;
+                            }
+                        };
+
+                        let mut contents = String::new();
+                        if file.read_to_string(&mut contents).is_err() {
+                            println!("Failed to read SSH key contents");
+                            return err;
+                        }
+
+                        let is_pem = contents.contains("BEGIN RSA PRIVATE KEY")
+                            || contents.contains("BEGIN PRIVATE KEY")
+                            || contents.contains("BEGIN DSA PRIVATE KEY")
+                            || contents.contains("BEGIN EC PRIVATE KEY");
+
+                        if is_pem {
+                            return err;
+                        }
+
+                        // Create a temporary file
+                        let temp_file = match NamedTempFile::new() {
+                            Ok(file) => file,
+                            Err(e) => {
+                                println!("Failed to create temporary file: {}", e);
+                                return None;
+                            }
+                        };
+
+                        // Copy original key to temp file
+                        if let Err(e) = fs::copy(key_path, temp_file.path()) {
+                            println!("Failed to copy SSH key: {}", e);
+                            return None;
+                        }
+
+                        // Run ssh-keygen to convert format
+                        let status = Command::new("ssh-keygen")
+                            .args(["-p", "-N", "", "-m", "PEM", "-f"])
+                            .arg(temp_file.path())
+                            .status();
+
+                        match status {
+                            Ok(status) if status.success() => {
+                                println!("Successfully converted key to PEM format");
+                                let path = temp_file.path().to_path_buf();
+                                self.temp_key = Some(temp_file); // Keep temp file alive
+                                Some(path)
+                            }
+                            Ok(_) => {
+                                println!("Failed to convert key to PEM format");
+                                None
+                            }
+                            Err(e) => {
+                                println!("Error executing ssh-keygen: {}", e);
+                                None
+                            }
                         }
                     }
-
-                    //MORE CODE HERE
                 }
 
                 // Last resort: Try on-the-fly SSH key format convertion to PEM

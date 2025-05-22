@@ -1,5 +1,14 @@
-# auth-git2
-
+# auth-git2-pem
+## About this fork:
+This small fork adds a fallback mechanism during the ssh authentication that converts non PEM keys to the OpenSSL PEM format using the [osshkeys](https://github.com/Leo1003/rust-osshkeys). This improves compatibility with git2-rs, which uses libssh2 under the hood and often struggles with OpenSSH-style keys.
+<br>
+<br>
+I built this to solve a key compatibility issue in my [Tauri Git GUI client](https://github.com/Stiff-Rock/GitTaur), GitTaur. Huge thanks to the authors of the original library and the tools that made this possible!
+<br>
+<br>
+Here's the original repository: https://github.com/de-vri-es/auth-git2-rs
+<br>
+## Original auth-git2-rs README:
 Easy authentication for [`git2`].
 
 Authentication with [`git2`] can be quite difficult to implement correctly.

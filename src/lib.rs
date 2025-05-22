@@ -128,9 +128,11 @@ mod log {
 mod base64_decode;
 mod default_prompt;
 mod prompter;
-mod ssh_key_git;
+mod ssh_key;
 
-use git2::Error;
+use osshkeys::KeyPair;
+
+use dirs::home_dir;
 pub use prompter::Prompter;
 
 /// Configurable authenticator to use with [`git2`].
@@ -153,6 +155,9 @@ pub struct GitAuthenticator {
 
     /// SSH keys to use from file.
     ssh_keys: Vec<PrivateKeyFileGit>,
+
+    /// Temporal key file for PEM convertion fallback
+    temp_file_path: PathBuf,
 
     /// Prompt for passwords for encrypted SSH keys.
     prompt_ssh_key_password: bool,
@@ -181,6 +186,14 @@ impl Default for GitAuthenticator {
     /// This is the same as [`GitAuthenticator::new()`].
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn get_temp_file_path() -> PathBuf {
+    if let Some(home_dir) = home_dir() {
+        home_dir.join(".ssh").join("id_rsa_temp")
+    } else {
+        PathBuf::new().join("id_rsa_temp")
     }
 }
 
@@ -220,6 +233,7 @@ impl GitAuthenticator {
             ssh_keys: Vec::new(),
             prompt_ssh_key_password: false,
             prompter: prompter::wrap_prompter(default_prompt::DefaultPrompter),
+            temp_file_path: get_temp_file_path(),
         }
     }
 
@@ -420,6 +434,22 @@ impl GitAuthenticator {
         make_credentials_callback(self, git_config)
     }
 
+    /// Deletes the temporal ssh key generated during make_credentials_callback, result of the fallback mechanism that transforms
+    /// non PEM keys to the OpenSSL PEM format using the osshkeys module for better compatibility with git2 underlaying libssh2.
+    pub fn clear_temp_key_file(&self) {
+        let path = &self.temp_file_path;
+
+        if !path.exists() {
+            debug!("No temporal file at {:#?}", path);
+            return;
+        }
+
+        match std::fs::remove_file(path) {
+            Ok(()) => debug!("Cleared temporal key file at {:#?}", path),
+            Err(e) => debug!("Failed to clear temporal key file - {}", e),
+        };
+    }
+
     /// Clone a repository using the git authenticator.
     ///
     /// If you need more control over the clone options,
@@ -441,7 +471,10 @@ impl GitAuthenticator {
         fetch_options.remote_callbacks(remote_callbacks);
         repo_builder.fetch_options(fetch_options);
 
-        repo_builder.clone(url, into)
+        let clone_res = repo_builder.clone(url, into);
+        self.clear_temp_key_file();
+
+        clone_res
     }
 
     /// Fetch from a remote using the git authenticator.
@@ -527,9 +560,6 @@ impl GitAuthenticator {
     }
 }
 
-use osshkeys::KeyPair;
-use std::io::Seek;
-
 fn make_credentials_callback<'a>(
     authenticator: &'a GitAuthenticator,
     git_config: &'a git2::Config,
@@ -540,6 +570,7 @@ fn make_credentials_callback<'a>(
     let mut try_ssh_keys = true;
     let mut ssh_keys = authenticator.ssh_keys.iter();
     let mut prompter = authenticator.prompter.clone();
+    let temp_file_path = &authenticator.temp_file_path;
 
     move |url: &str, username: Option<&str>, allowed: git2::CredentialType| {
         trace!(
@@ -592,10 +623,7 @@ fn make_credentials_callback<'a>(
                         let prompter = Some(prompter.as_prompter_mut())
                             .filter(|_| authenticator.prompt_ssh_key_password);
                         match key.to_credentials(username, prompter, git_config) {
-                            Ok(x) => {
-                                debug!("YEAH!");
-                                return Ok(x);
-                            }
+                            Ok(x) => return Ok(x),
                             Err(e) => {
                                 debug!(
                                 "credentials_callback: failed to use SSH key from file {:?}: {e}",
@@ -606,10 +634,12 @@ fn make_credentials_callback<'a>(
                     }
                 }
 
+                // Try converting SSH key to PEM format since it's more compatible with libssh2
                 while let Some(key) = ssh_keys.next() {
-                    debug!("Attempting convertion to PEM format");
-                    // Try converting SSH key to PEM format since it's more compatible with libssh2
-                    debug!("Using key {}", &key.private_key.display());
+                    debug!(
+                        "Attempting convertion to PEM format with key {}",
+                        &key.private_key.display()
+                    );
                     let key_path = &key.private_key;
                     let mut file = match File::open(&key_path) {
                         Ok(file) => file,
@@ -619,101 +649,63 @@ fn make_credentials_callback<'a>(
                         }
                     };
 
-                    let mut contents = String::new();
-                    if file.read_to_string(&mut contents).is_err() {
-                        debug!("Failed to read SSH key contents");
+                    let mut key_contents = String::new();
+                    if let Err(e) = file.read_to_string(&mut key_contents) {
+                        debug!("Failed to read SSH key contents: {}", e);
                         continue;
                     }
 
-                    let is_pem = contents.contains("BEGIN RSA PRIVATE KEY")
-                        || contents.contains("BEGIN PRIVATE KEY")
-                        || contents.contains("BEGIN DSA PRIVATE KEY")
-                        || contents.contains("BEGIN EC PRIVATE KEY");
+                    let is_pem = key_contents.contains("BEGIN RSA PRIVATE KEY")
+                        || key_contents.contains("BEGIN PRIVATE KEY")
+                        || key_contents.contains("BEGIN DSA PRIVATE KEY")
+                        || key_contents.contains("BEGIN EC PRIVATE KEY");
 
                     if is_pem {
-                        return Err(Error::from_str(
-                            &"Failed to read SSH key contents".to_string(),
-                        ));
+                        debug!(
+                            "Ssh key at {} is already PEM, skipping...",
+                            &key.private_key.display()
+                        );
+                        continue;
                     }
 
-                    // Create a temporary file
-                    let mut temp_file = match tempfile::NamedTempFile::new() {
-                        Ok(file) => file,
-                        Err(e) => {
-                            debug!("Failed to create temporary file: {}", e);
-                            continue;
-                        }
-                    };
-
-                    // Copy original key to temp file
-                    std::fs::copy(key_path, temp_file.path()).expect("Failed to copy SSH key: {}");
-
-                    let openssh_pem = std::fs::read_to_string(temp_file.path())
-                        .expect("Failed to read temporary ssh key");
-
+                    // Get the keypair file from the contents of the key
                     let keypair: KeyPair =
-                        KeyPair::from_keystr(&openssh_pem, key.password.as_deref())
+                        KeyPair::from_keystr(&key_contents.clone(), key.password.as_deref())
                             .expect("Faied to get keypair");
 
                     // Transform the key to PEM format (more compatible)
-                    let pkcs8_pem = keypair
-                        .serialize_pkcs8(key.password.as_deref())
+                    let pem_key = keypair
+                        .serialize_pem(key.password.as_deref())
                         .expect("Error tranforming temp key to PEM");
 
-                    temp_file
-                        .as_file_mut()
-                        .set_len(0)
-                        .expect("Falied to remove temp file contents");
+                    File::create(temp_file_path).expect("Failed to create file");
+
+                    let mut temp_file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .truncate(true)
+                        .open(temp_file_path)
+                        .expect("Failed to write transformed key contents into temp file");
 
                     temp_file
-                        .as_file_mut()
-                        .write_all(pkcs8_pem.as_bytes())
+                        .write_all(pem_key.as_bytes())
                         .expect("Failed to write PEM key to temp file");
 
-                    temp_file
-                        .as_file_mut()
-                        .flush()
-                        .expect("Failed to flush file");
-
-                    temp_file
-                        .as_file_mut()
-                        .seek(std::io::SeekFrom::Start(0))
-                        .expect("Failed to seek to beginning");
-
-                    let short = temp_file.path();
-                    let long = std::fs::canonicalize(&short).expect("Filed to canonicalize");
-                    println!("Long path: {}", long.display());
-                    if temp_file.path().to_path_buf().exists() {
-                        debug!("Temp file exists");
-
-                        let mut content = String::new();
-                        temp_file
-                            .read_to_string(&mut content)
-                            .expect("Error reading temp file contents");
-                        debug!("NEW KEY: {:#?}", content);
-                    } else {
-                        debug!("Error: Temp file does not exist");
-                        continue;
-                    }
-                    //
-
-                    let mut file = File::create(Path::new("C:\\Users\\yago.pernas\\Desktop\\KEY"))
-                        .expect("Error creating file");
-
-                    file.write_all(pkcs8_pem.as_bytes())
-                        .expect("Error writing file");
-
-                    file.flush().expect("Error flushing file");
+                    debug!(
+                        "Creating credential with new key at {:#?}",
+                        temp_file_path.to_path_buf()
+                    );
 
                     let new_key = PrivateKeyFileGit {
-                        private_key: temp_file.path().to_path_buf(),
+                        private_key: temp_file_path.to_path_buf(),
                         public_key: key.public_key.clone(),
                         password: key.password.clone(),
                     };
 
                     let prompter2 = Some(prompter.as_prompter_mut())
                         .filter(|_| authenticator.prompt_ssh_key_password);
-                    match new_key.to_credentials(username, prompter2, git_config) {
+                    let result = new_key.to_credentials(username, prompter2, git_config);
+
+                    match result {
                         Ok(x) => return Ok(x),
                         Err(e) => {
                             debug!(
@@ -795,7 +787,7 @@ impl PrivateKeyFileGit {
                 Some(password),
             )
         } else if let Some(prompter) = prompter {
-            let password = match ssh_key_git::analyze_ssh_key_file(&self.private_key) {
+            let password = match ssh_key::analyze_ssh_key_file(&self.private_key) {
                 Err(e) => {
                     warn!(
                         "Failed to analyze SSH key: {}: {}",

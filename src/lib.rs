@@ -101,9 +101,9 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "log")]
 mod log {
-    pub use ::log::debug;
-    pub use ::log::trace;
-    pub use ::log::warn;
+    pub use log::debug;
+    pub use log::trace;
+    pub use log::warn;
 }
 
 #[cfg(feature = "log")]
@@ -656,18 +656,27 @@ fn make_credentials_callback<'a>(
                         continue;
                     }
 
+                    let password = prompter.prompt_ssh_key_passphrase(&key.private_key, git_config);
+
+                    let pass = password.as_deref();
+
+                    if pass.is_some() {
+                        debug!("PASS: {}", pass.unwrap());
+                    } else {
+                        debug!("password is NONE");
+                    }
+
                     // Get the keypair file from the contents of the key
-                    let keypair: KeyPair =
-                        match KeyPair::from_keystr(&key_contents, key.password.as_deref()) {
-                            Ok(kp) => kp,
-                            Err(e) => {
-                                debug!("Failed to get keypair from SSH key: {}", e);
-                                continue;
-                            }
-                        };
+                    let keypair: KeyPair = match KeyPair::from_keystr(&key_contents, pass) {
+                        Ok(kp) => kp,
+                        Err(e) => {
+                            debug!("Failed to get keypair from SSH key: {}", e);
+                            continue;
+                        }
+                    };
 
                     // Transform the key to OpenSSL PEM format
-                    let pem_key = match keypair.serialize_pem(key.password.as_deref()) {
+                    let pem_key = match keypair.serialize_pem(pass) {
                         Ok(pem) => pem,
                         Err(e) => {
                             debug!("Error transforming key to PEM format: {}", e);

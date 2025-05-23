@@ -51,6 +51,63 @@ pub fn analyze_ssh_key_file(priv_key_path: &Path) -> Result<KeyInfo, Error> {
     analyze_pem_openssh_key(&buffer)
 }
 
+use log::*;
+use rsa::{pkcs1::EncodeRsaPrivateKey, pkcs8::der::zeroize::Zeroizing, BigUint};
+use ssh_key::{private::PrivateKey, Algorithm};
+use std::fs;
+
+/// Convert an SSH key file to OpenSSL PEM format
+/// Note: Ed25519 convertion results in a non-valid key, Ecdsa convertion works with ssh connection
+/// with github but not through git2's libssh2-rs library and DSA is no longer supported by GitHub
+pub fn convert_ssh_key_to_pem(
+    input_path: &Path,
+    passphrase: Option<&str>,
+) -> Result<Option<Zeroizing<String>>, String> {
+    debug!("Attepmting convertion of key RSA");
+
+    let key_data =
+        fs::read_to_string(input_path).map_err(|e| format!("Failed to read key to string: {e}"))?;
+
+    let private_key = PrivateKey::from_openssh(&key_data)
+        .map_err(|e| format!("Failed to open key from OpenSSH: {e}"))?;
+
+    let is_encrypted = private_key.is_encrypted();
+
+    //NOTE: I can't seem to figure out pure-rust conversion of encrypted keys
+    if is_encrypted && passphrase.is_some() {
+        return Ok(None);
+    }
+
+    match &private_key.algorithm() {
+        Algorithm::Rsa { .. } => {
+            debug!("Provided key is RSA");
+
+            let rsa_keypair: &ssh_key::private::RsaKeypair = private_key
+                .key_data()
+                .rsa()
+                .ok_or("Unable to obtain RSA keypair")
+                .map_err(|e| format!("{e}"))?;
+
+            let n = BigUint::from_bytes_be(rsa_keypair.public.n.as_bytes());
+            let e = BigUint::from_bytes_be(rsa_keypair.public.e.as_bytes());
+            let d = BigUint::from_bytes_be(rsa_keypair.private.d.as_bytes());
+            let p = BigUint::from_bytes_be(rsa_keypair.private.p.as_bytes());
+            let q = BigUint::from_bytes_be(rsa_keypair.private.q.as_bytes());
+            let primes: Vec<BigUint> = vec![p, q];
+
+            let rsa_private_key = rsa::RsaPrivateKey::from_components(n, e, d, primes)
+                .map_err(|e| format!("Failed to construct the RSA key from components: {e}"))?;
+
+            let pem_key = rsa_private_key
+                .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+                .map_err(|e| format!("Failed to convert RSA key to pkcs1 PEM: {e}"))?;
+
+            Ok(Some(pem_key))
+        }
+        _ => return Ok(None),
+    }
+}
+
 /// Analyze a PEM encoded openssh-key-v1 file.
 fn analyze_pem_openssh_key(data: &[u8]) -> Result<KeyInfo, Error> {
     let data = trim_bytes(data);

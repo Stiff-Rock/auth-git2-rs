@@ -95,15 +95,14 @@
 #![warn(missing_docs)]
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "log")]
 mod log {
-    pub use ::log::debug;
-    pub use ::log::trace;
-    pub use ::log::warn;
+    pub use log::debug;
+    pub use log::trace;
+    pub use log::warn;
 }
 
 #[cfg(feature = "log")]
@@ -130,9 +129,8 @@ mod default_prompt;
 mod prompter;
 mod ssh_key;
 
-use osshkeys::KeyPair;
-
 pub use prompter::Prompter;
+use ssh_key::convert_ssh_key_to_pem;
 use tempfile::NamedTempFile;
 
 /// Configurable authenticator to use with [`git2`].
@@ -627,53 +625,11 @@ fn make_credentials_callback<'a>(
 
                 // Try converting SSH key to OpenSSL PEM format since it's more compatible with git2 underlying libssh2
                 while let Some(key) = ssh_keys.next() {
-                    debug!(
-                        "Attempting convertion to PEM format with key {}",
-                        &key.private_key.display()
-                    );
-
-                    let key_contents = match std::fs::read_to_string(&key.private_key) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            debug!(
-                                "Falied to read contents of ssh key {:#?}: {e}",
-                                &key.private_key
-                            );
-                            continue;
-                        }
-                    };
-
-                    let is_pem = key_contents.contains("BEGIN RSA PRIVATE KEY")
-                        || key_contents.contains("BEGIN PRIVATE KEY")
-                        || key_contents.contains("BEGIN DSA PRIVATE KEY")
-                        || key_contents.contains("BEGIN EC PRIVATE KEY");
-
-                    if is_pem {
-                        debug!(
-                            "Ssh key at {} is already PEM, skipping...",
-                            &key.private_key.display()
-                        );
-                        continue;
-                    }
-
-                    // Get the keypair file from the contents of the key
-                    let keypair: KeyPair =
-                        match KeyPair::from_keystr(&key_contents, key.password.as_deref()) {
-                            Ok(kp) => kp,
-                            Err(e) => {
-                                debug!("Failed to get keypair from SSH key: {}", e);
-                                continue;
-                            }
+                    let pem_key =
+                        match convert_ssh_key_to_pem(&key.private_key, key.password.as_deref()) {
+                            Ok(Some(pem)) => pem,
+                            Ok(None) | Err(_) => continue,
                         };
-
-                    // Transform the key to OpenSSL PEM format
-                    let pem_key = match keypair.serialize_pem(key.password.as_deref()) {
-                        Ok(pem) => pem,
-                        Err(e) => {
-                            debug!("Error transforming key to PEM format: {}", e);
-                            continue;
-                        }
-                    };
 
                     // Write into temporary file
                     if let Err(e) = temp_file.write_all(pem_key.as_bytes()) {
@@ -683,7 +639,9 @@ fn make_credentials_callback<'a>(
 
                     // Create the credential out fo the temporal converted ssh key
                     let temp_file_path = temp_file.path().to_path_buf();
+
                     debug!("Creating credential with new key at {:#?}", temp_file_path);
+
                     let new_key = PrivateKeyFileGit {
                         private_key: temp_file_path,
                         public_key: key.public_key.clone(),

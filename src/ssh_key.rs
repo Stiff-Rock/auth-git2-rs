@@ -51,20 +51,17 @@ pub fn analyze_ssh_key_file(priv_key_path: &Path) -> Result<KeyInfo, Error> {
     analyze_pem_openssh_key(&buffer)
 }
 
-use crate::log::debug;
 use rsa::{pkcs1::EncodeRsaPrivateKey, pkcs8::der::zeroize::Zeroizing, BigUint};
 use ssh_key::{private::PrivateKey, Algorithm};
 use std::fs;
 
 /// Convert an SSH key file to OpenSSL PEM format
-/// Note: Ed25519 convertion results in a non-valid key, Ecdsa convertion works with ssh connection
+/// Note: Ed25519 conversion results in a non-valid key, Ecdsa conversion works with ssh connection
 /// with github but not through git2's libssh2-rs library and DSA is no longer supported by GitHub
 pub fn convert_ssh_key_to_pem(
     input_path: &Path,
     passphrase: Option<&str>,
 ) -> Result<Option<Zeroizing<String>>, String> {
-    debug!("Attepmting convertion of key RSA");
-
     let key_data =
         fs::read_to_string(input_path).map_err(|e| format!("Failed to read key to string: {e}"))?;
 
@@ -80,8 +77,6 @@ pub fn convert_ssh_key_to_pem(
 
     match &private_key.algorithm() {
         Algorithm::Rsa { .. } => {
-            debug!("Provided key is RSA");
-
             let rsa_keypair: &ssh_key::private::RsaKeypair = private_key
                 .key_data()
                 .rsa()

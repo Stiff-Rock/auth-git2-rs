@@ -421,7 +421,7 @@ impl GitAuthenticator {
         make_credentials_callback(self, git_config, temp_key_file)
     }
 
-    /// Creates a temporal file to use in the OpenSSL PEM key convertion fallback mechanism during
+    /// Creates a temporal file to use in the OpenSSL PEM key conversion fallback mechanism during
     /// the execution of make_credentials_callback
     fn create_temp_key_file(&self) -> Result<tempfile::NamedTempFile, git2::Error> {
         let temp_file = tempfile::Builder::new()
@@ -625,6 +625,7 @@ fn make_credentials_callback<'a>(
 
                 // Try converting SSH key to OpenSSL PEM format since it's more compatible with git2 underlying libssh2
                 while let Some(key) = ssh_keys.next() {
+                    debug!("Attempting conversion of RSA key");
                     let pem_key =
                         match convert_ssh_key_to_pem(&key.private_key, key.password.as_deref()) {
                             Ok(Some(pem)) => pem,
@@ -637,7 +638,7 @@ fn make_credentials_callback<'a>(
                         continue;
                     }
 
-                    // Create the credential out fo the temporal converted ssh key
+                    // Create the credentials out of the temporary converted ssh key
                     let temp_file_path = temp_file.path().to_path_buf();
 
                     debug!("Creating credential with new key at {:#?}", temp_file_path);

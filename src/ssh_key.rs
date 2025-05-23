@@ -51,7 +51,7 @@ pub fn analyze_ssh_key_file(priv_key_path: &Path) -> Result<KeyInfo, Error> {
     analyze_pem_openssh_key(&buffer)
 }
 
-use log::*;
+use crate::log::debug;
 use rsa::{pkcs1::EncodeRsaPrivateKey, pkcs8::der::zeroize::Zeroizing, BigUint};
 use ssh_key::{private::PrivateKey, Algorithm};
 use std::fs;

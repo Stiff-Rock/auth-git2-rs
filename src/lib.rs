@@ -131,7 +131,6 @@ mod ssh_key;
 
 pub use prompter::Prompter;
 use ssh_key::convert_ssh_key_to_pem;
-use tempfile::NamedTempFile;
 
 /// Configurable authenticator to use with [`git2`].
 #[derive(Clone)]
@@ -415,21 +414,19 @@ impl GitAuthenticator {
     pub fn credentials<'a>(
         &'a self,
         git_config: &'a git2::Config,
-        temp_key_file: &'a NamedTempFile,
     ) -> impl 'a + FnMut(&str, Option<&str>, git2::CredentialType) -> Result<git2::Cred, git2::Error>
     {
-        make_credentials_callback(self, git_config, temp_key_file)
+        make_credentials_callback(self, git_config)
     }
 
     /// Creates a temporal file to use in the OpenSSL PEM key conversion fallback mechanism during
     /// the execution of make_credentials_callback
-    fn create_temp_key_file(&self) -> Result<tempfile::NamedTempFile, git2::Error> {
-        let temp_file = tempfile::Builder::new()
+    fn create_temp_key_file(&self) -> tempfile::NamedTempFile {
+        tempfile::Builder::new()
             .prefix("git-ssh-key-")
             .tempfile()
-            .map_err(|e| git2::Error::from_str(&format!("Failed to create temp file: {}", e)))?;
-
-        Ok(temp_file)
+            .map_err(|e| e.to_string())
+            .expect("Failed to create temp file:")
     }
 
     /// Clone a repository using the git authenticator.
@@ -444,14 +441,12 @@ impl GitAuthenticator {
         let url = url.as_ref();
         let into = into.as_ref();
 
-        let temp_key_file = self.create_temp_key_file()?;
-
         let git_config = git2::Config::open_default()?;
         let mut repo_builder = git2::build::RepoBuilder::new();
         let mut fetch_options = git2::FetchOptions::new();
         let mut remote_callbacks = git2::RemoteCallbacks::new();
 
-        remote_callbacks.credentials(self.credentials(&git_config, &temp_key_file));
+        remote_callbacks.credentials(self.credentials(&git_config));
         fetch_options.remote_callbacks(remote_callbacks);
         repo_builder.fetch_options(fetch_options);
 
@@ -471,13 +466,11 @@ impl GitAuthenticator {
         refspecs: &[&str],
         reflog_msg: Option<&str>,
     ) -> Result<(), git2::Error> {
-        let temp_key_file = self.create_temp_key_file()?;
-
         let git_config = repo.config()?;
         let mut fetch_options = git2::FetchOptions::new();
         let mut remote_callbacks = git2::RemoteCallbacks::new();
 
-        remote_callbacks.credentials(self.credentials(&git_config, &temp_key_file));
+        remote_callbacks.credentials(self.credentials(&git_config));
         fetch_options.remote_callbacks(remote_callbacks);
         remote.fetch(refspecs, Some(&mut fetch_options), reflog_msg)
     }
@@ -495,13 +488,11 @@ impl GitAuthenticator {
         remote: &mut git2::Remote,
         refspecs: &[&str],
     ) -> Result<(), git2::Error> {
-        let temp_key_file = self.create_temp_key_file()?;
-
         let git_config = repo.config()?;
         let mut fetch_options = git2::FetchOptions::new();
         let mut remote_callbacks = git2::RemoteCallbacks::new();
 
-        remote_callbacks.credentials(self.credentials(&git_config, &temp_key_file));
+        remote_callbacks.credentials(self.credentials(&git_config));
         fetch_options.remote_callbacks(remote_callbacks);
         remote.download(refspecs, Some(&mut fetch_options))
     }
@@ -516,13 +507,11 @@ impl GitAuthenticator {
         remote: &mut git2::Remote,
         refspecs: &[&str],
     ) -> Result<(), git2::Error> {
-        let temp_key_file = self.create_temp_key_file()?;
-
         let git_config = repo.config()?;
         let mut push_options = git2::PushOptions::new();
         let mut remote_callbacks = git2::RemoteCallbacks::new();
 
-        remote_callbacks.credentials(self.credentials(&git_config, &temp_key_file));
+        remote_callbacks.credentials(self.credentials(&git_config));
         push_options.remote_callbacks(remote_callbacks);
 
         remote.push(refspecs, Some(&mut push_options))
@@ -552,7 +541,6 @@ impl GitAuthenticator {
 fn make_credentials_callback<'a>(
     authenticator: &'a GitAuthenticator,
     git_config: &'a git2::Config,
-    mut temp_file: &'a NamedTempFile,
 ) -> impl 'a + FnMut(&str, Option<&str>, git2::CredentialType) -> Result<git2::Cred, git2::Error> {
     let mut try_cred_helper = authenticator.try_cred_helper;
     let mut try_password_prompt = authenticator.try_password_prompt;
@@ -631,6 +619,8 @@ fn make_credentials_callback<'a>(
                             Ok(Some(pem)) => pem,
                             Ok(None) | Err(_) => continue,
                         };
+
+                    let mut temp_file = &authenticator.create_temp_key_file();
 
                     // Write into temporary file
                     if let Err(e) = temp_file.write_all(pem_key.as_bytes()) {

@@ -519,15 +519,23 @@ impl GitAuthenticator {
     ///
     /// If you need more control over the push options,
     /// use [`Self::credentials()`] with [`git2::Remote::push()`].
-    pub fn push(
+    pub fn push<F>(
         &self,
         repo: &git2::Repository,
         remote: &mut git2::Remote,
         refspecs: &[&str],
-    ) -> Result<(), git2::Error> {
+        progress_callback: Option<F>,
+    ) -> Result<(), git2::Error>
+    where
+        F: FnMut(usize, usize, usize) + 'static,
+    {
         let git_config = repo.config()?;
         let mut push_options = git2::PushOptions::new();
         let mut remote_callbacks = git2::RemoteCallbacks::new();
+
+        if let Some(callback) = progress_callback {
+            remote_callbacks.push_transfer_progress(callback);
+        }
 
         remote_callbacks.credentials(self.credentials(&git_config));
         push_options.remote_callbacks(remote_callbacks);

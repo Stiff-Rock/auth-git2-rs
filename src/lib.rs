@@ -468,18 +468,27 @@ impl GitAuthenticator {
     ///
     /// If you need more control over the fetch options,
     /// use [`Self::credentials()`] with [`git2::Remote::fetch()`].
-    pub fn fetch(
+    pub fn fetch<F>(
         &self,
         repo: &git2::Repository,
         remote: &mut git2::Remote,
         refspecs: &[&str],
         reflog_msg: Option<&str>,
-    ) -> Result<(), git2::Error> {
+        progress_callback: Option<F>,
+    ) -> Result<(), git2::Error>
+    where
+        F: FnMut(git2::Progress<'_>) -> bool + 'static,
+    {
         let git_config = repo.config()?;
         let mut fetch_options = git2::FetchOptions::new();
         let mut remote_callbacks = git2::RemoteCallbacks::new();
 
         remote_callbacks.credentials(self.credentials(&git_config));
+
+        if let Some(callback) = progress_callback {
+            remote_callbacks.transfer_progress(callback);
+        }
+
         fetch_options.remote_callbacks(remote_callbacks);
         remote.fetch(refspecs, Some(&mut fetch_options), reflog_msg)
     }

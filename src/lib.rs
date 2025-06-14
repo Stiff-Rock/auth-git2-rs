@@ -433,11 +433,15 @@ impl GitAuthenticator {
     ///
     /// If you need more control over the clone options,
     /// use [`Self::credentials()`] with a [`git2::build::RepoBuilder`].
-    pub fn clone_repo(
+    pub fn clone_repo<F>(
         &self,
         url: impl AsRef<str>,
         into: impl AsRef<Path>,
-    ) -> Result<git2::Repository, git2::Error> {
+        progress_callback: Option<F>,
+    ) -> Result<git2::Repository, git2::Error>
+    where
+        F: FnMut(git2::Progress<'_>) -> bool + 'static,
+    {
         let url = url.as_ref();
         let into = into.as_ref();
 
@@ -447,6 +451,11 @@ impl GitAuthenticator {
         let mut remote_callbacks = git2::RemoteCallbacks::new();
 
         remote_callbacks.credentials(self.credentials(&git_config));
+
+        if let Some(callback) = progress_callback {
+            remote_callbacks.transfer_progress(callback);
+        }
+
         fetch_options.remote_callbacks(remote_callbacks);
         repo_builder.fetch_options(fetch_options);
 
